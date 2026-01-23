@@ -1,23 +1,3 @@
-From 31dee60d96d4a89d46a20fd6b7d0c0b94e32a11f Mon Sep 17 00:00:00 2001
-From: vehlwn <36479428+vehlwn@users.noreply.github.com>
-Date: Wed, 22 Jun 2022 16:57:44 +0400
-Subject: [PATCH 01/17] Update gitignore
-
----
- .gitignore | 1 +
- 1 file changed, 1 insertion(+)
-
-diff --git a/.gitignore b/.gitignore
-index f4fe857af0..79552c6cd6 100644
---- a/.gitignore
-+++ b/.gitignore
-@@ -64,3 +64,4 @@ settings.local.json
- # Cursor IDE local settings (but keep .cursor/rules/)
- .cursor/*
- !.cursor/rules/
-+build/
--- 
-2.52.0
 
 
 From 25a7b018d5c8389524991501a86df3441adcb8ac Mon Sep 17 00:00:00 2001
@@ -72,57 +52,6 @@ index 4ca96c1768..0320e16ecc 100644
  }
  
  bool SponsoredMessages::isTopBarFor(not_null<History*> history) const {
--- 
-2.52.0
-
-
-From 951906f6d006ab8abc9a4876eb93b8949eeb2747 Mon Sep 17 00:00:00 2001
-From: vehlwn <36479428+vehlwn@users.noreply.github.com>
-Date: Fri, 19 May 2023 17:51:54 +0400
-Subject: [PATCH 04/17] Cannot react
-
----
- Telegram/SourceFiles/history/history_item.cpp | 13 +++----------
- 1 file changed, 3 insertions(+), 10 deletions(-)
-
-diff --git a/Telegram/SourceFiles/history/history_item.cpp b/Telegram/SourceFiles/history/history_item.cpp
-index ed81a52348..321172a24a 100644
---- a/Telegram/SourceFiles/history/history_item.cpp
-+++ b/Telegram/SourceFiles/history/history_item.cpp
-@@ -2938,16 +2938,7 @@ void HistoryItem::translationDone(LanguageId to, TextWithEntities result) {
- }
- 
- bool HistoryItem::canReact() const {
--	if (!isRegular()) {
--		return false;
--	} else if (isService()) {
--		return (_flags & MessageFlag::ReactionsAllowed);
--	} else if (const auto media = this->media()) {
--		if (media->call()) {
--			return (_flags & MessageFlag::ReactionsAllowed);
--		}
--	}
--	return true;
-+    return false;
- }
- 
- void HistoryItem::addPaidReaction(
-@@ -4418,6 +4409,7 @@ void HistoryItem::createComponentsHelper(HistoryItemCommonFields &&fields) {
- }
- 
- void HistoryItem::setReactions(const MTPMessageReactions *reactions) {
-+    return;
- 	Expects(!_reactions);
- 
- 	if (changeReactions(reactions) && _reactions->hasUnread()) {
-@@ -4426,6 +4418,7 @@ void HistoryItem::setReactions(const MTPMessageReactions *reactions) {
- }
- 
- void HistoryItem::updateReactions(const MTPMessageReactions *reactions) {
-+    return;
- 	const auto wasRecentUsers = LookupRecentUnreadReactedUsers(this);
- 	const auto hadUnread = hasUnreadReaction();
- 	const auto changed = changeReactions(reactions);
 -- 
 2.52.0
 
@@ -232,88 +161,6 @@ index 321172a24a..af77486f05 100644
 2.52.0
 
 
-From d2114da1bcc800531f64beb58ee101158659e79a Mon Sep 17 00:00:00 2001
-From: vehlwn <36479428+vehlwn@users.noreply.github.com>
-Date: Mon, 22 May 2023 17:11:53 +0400
-Subject: [PATCH 07/17] Disable context menu item N Reacted
-
----
- Telegram/SourceFiles/history/history_inner_widget.cpp          | 3 +--
- .../SourceFiles/history/view/history_view_context_menu.cpp     | 3 +--
- 2 files changed, 2 insertions(+), 4 deletions(-)
-
-diff --git a/Telegram/SourceFiles/history/history_inner_widget.cpp b/Telegram/SourceFiles/history/history_inner_widget.cpp
-index c59e12ed12..ea085ada5f 100644
---- a/Telegram/SourceFiles/history/history_inner_widget.cpp
-+++ b/Telegram/SourceFiles/history/history_inner_widget.cpp
-@@ -2337,8 +2337,7 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
- 		return item;
- 	};
- 	const auto leaderOrSelf = groupLeaderOrSelf(_dragStateItem);
--	const auto hasWhoReactedItem = leaderOrSelf
--		&& Api::WhoReactedExists(leaderOrSelf, Api::WhoReactedList::All);
-+	const auto hasWhoReactedItem = false;
- 	using namespace HistoryView::Reactions;
- 	const auto clickedReaction = ReactionIdOfLink(link);
- 	const auto linkPhoneNumber = link
-diff --git a/Telegram/SourceFiles/history/view/history_view_context_menu.cpp b/Telegram/SourceFiles/history/view/history_view_context_menu.cpp
-index 6acabc7a7b..d5b0aaefe1 100644
---- a/Telegram/SourceFiles/history/view/history_view_context_menu.cpp
-+++ b/Telegram/SourceFiles/history/view/history_view_context_menu.cpp
-@@ -1291,8 +1291,7 @@ base::unique_qptr<Ui::PopupMenu> FillContextMenu(
- 		: nullptr;
- 	const auto hasSelection = !request.selectedItems.empty()
- 		|| !request.selectedText.empty();
--	const auto hasWhoReactedItem = item
--		&& Api::WhoReactedExists(item, Api::WhoReactedList::All);
-+	const auto hasWhoReactedItem = false;
- 
- 	auto result = base::make_unique_q<Ui::PopupMenu>(
- 		list,
--- 
-2.52.0
-
-
-From 37c4e75ef16be950fec9bae2701b20b2375e3cf3 Mon Sep 17 00:00:00 2001
-From: vehlwn <36479428+vehlwn@users.noreply.github.com>
-Date: Wed, 24 May 2023 10:25:35 +0400
-Subject: [PATCH 08/17] Cannot pin messages; disabled PinnedBar
-
----
- Telegram/SourceFiles/data/data_peer.cpp         | 2 +-
- Telegram/SourceFiles/history/history_widget.cpp | 2 +-
- 2 files changed, 2 insertions(+), 2 deletions(-)
-
-diff --git a/Telegram/SourceFiles/data/data_peer.cpp b/Telegram/SourceFiles/data/data_peer.cpp
-index 34079a0236..b42b5e2461 100644
---- a/Telegram/SourceFiles/data/data_peer.cpp
-+++ b/Telegram/SourceFiles/data/data_peer.cpp
-@@ -1748,7 +1748,7 @@ Data::RestrictionCheckResult PeerData::amRestricted(
- 				: Result::Allowed())
- 			: (right == ChatRestriction::PinMessages)
- 			? ((user->flags() & UserDataFlag::CanPinMessages)
--				? Result::Allowed()
-+				? Result::Explicit()
- 				: Result::Explicit())
- 			: Result::Allowed();
- 	} else if (const auto channel = asChannel()) {
-diff --git a/Telegram/SourceFiles/history/history_widget.cpp b/Telegram/SourceFiles/history/history_widget.cpp
-index bcbdaad903..2b793a644b 100644
---- a/Telegram/SourceFiles/history/history_widget.cpp
-+++ b/Telegram/SourceFiles/history/history_widget.cpp
-@@ -7988,7 +7988,7 @@ void HistoryWidget::checkPinnedBarState() {
- 		}
- 		return;
- 	}
--	if (_pinnedBar || !universalPinnedId) {
-+	if (true) {
- 		return;
- 	}
- 
--- 
-2.52.0
-
-
 From fbcbc02c04251c1e364c9b1e20570ccdeaff811f Mon Sep 17 00:00:00 2001
 From: vehlwn <36479428+vehlwn@users.noreply.github.com>
 Date: Wed, 24 May 2023 10:55:01 +0400
@@ -417,35 +264,6 @@ index a7b32fdcdf..b85d6a33c9 100644
 -- 
 2.52.0
 
-
-From 52016600942ee0f37583ff74419707797131fe9e Mon Sep 17 00:00:00 2001
-From: vehlwn <36479428+vehlwn@users.noreply.github.com>
-Date: Thu, 25 May 2023 14:38:14 +0400
-Subject: [PATCH 11/17] Disable MUTE/UNMUTE button
-
----
- Telegram/SourceFiles/history/history_widget.cpp | 6 +-----
- 1 file changed, 1 insertion(+), 5 deletions(-)
-
-diff --git a/Telegram/SourceFiles/history/history_widget.cpp b/Telegram/SourceFiles/history/history_widget.cpp
-index 1158f0edf8..ccef44e9b4 100644
---- a/Telegram/SourceFiles/history/history_widget.cpp
-+++ b/Telegram/SourceFiles/history/history_widget.cpp
-@@ -5520,11 +5520,7 @@ bool HistoryWidget::isChoosingTheme() const {
- }
- 
- bool HistoryWidget::isMuteUnmute() const {
--	return _peer
--		&& ((_peer->isBroadcast() && !_peer->asChannel()->canPostMessages())
--			|| (_peer->isGigagroup() && !Data::CanSendAnything(_peer))
--			|| _peer->isRepliesChat()
--			|| _peer->isVerifyCodes());
-+	return false;
- }
- 
- bool HistoryWidget::isSearching() const {
--- 
-2.52.0
 
 
 From c18a992c9278fe43eed9e64e1e9c763a78483de9 Mon Sep 17 00:00:00 2001
@@ -553,59 +371,6 @@ index 715ff47054..d198a35ba0 100644
 -- 
 2.52.0
 
-
-From 017369fb6faa1f9a066db666b30f65dcfc3fc763 Mon Sep 17 00:00:00 2001
-From: vehlwn <36479428+vehlwn@users.noreply.github.com>
-Date: Sun, 19 Nov 2023 12:23:06 +0400
-Subject: [PATCH 14/17] Disable background color on replies
-
----
- Telegram/SourceFiles/ui/chat/chat_style.h | 2 +-
- 1 file changed, 1 insertion(+), 1 deletion(-)
-
-diff --git a/Telegram/SourceFiles/ui/chat/chat_style.h b/Telegram/SourceFiles/ui/chat/chat_style.h
-index f97cde14c2..20f064ce9e 100644
---- a/Telegram/SourceFiles/ui/chat/chat_style.h
-+++ b/Telegram/SourceFiles/ui/chat/chat_style.h
-@@ -36,7 +36,7 @@ inline constexpr auto kColorPatternsCount = Text::kMaxQuoteOutlines;
- inline constexpr auto kColorIndexCount = uint8(1 << 6);
- inline constexpr auto kSimpleColorIndexCount = uint8(7);
- 
--inline constexpr auto kDefaultBgOpacity = 0.12;
-+inline constexpr auto kDefaultBgOpacity = 0;
- inline constexpr auto kDefaultOutline1Opacity = 0.9;
- inline constexpr auto kDefaultOutline2Opacity = 0.3;
- inline constexpr auto kDefaultOutline3Opacity = 0.6;
--- 
-2.52.0
-
-
-From 7eacb74802c09a3ce92827ebde6d2510442f6755 Mon Sep 17 00:00:00 2001
-From: vehlwn <36479428+vehlwn@users.noreply.github.com>
-Date: Sun, 19 Nov 2023 12:56:39 +0400
-Subject: [PATCH 15/17] Disable background emoji on replies
-
----
- Telegram/SourceFiles/history/view/history_view_reply.cpp | 4 +---
- 1 file changed, 1 insertion(+), 3 deletions(-)
-
-diff --git a/Telegram/SourceFiles/history/view/history_view_reply.cpp b/Telegram/SourceFiles/history/view/history_view_reply.cpp
-index f7af04bdf8..4e99cdd1df 100644
---- a/Telegram/SourceFiles/history/view/history_view_reply.cpp
-+++ b/Telegram/SourceFiles/history/view/history_view_reply.cpp
-@@ -779,9 +779,7 @@ void Reply::paint(
- 	const auto &quoteSt = _hasQuoteIcon
- 		? st::messageTextStyle.blockquote
- 		: st::messageQuoteStyle;
--	const auto backgroundEmojiData = backgroundEmojiId
--		? st->backgroundEmojiData(backgroundEmojiId, colorCollectible).get()
--		: nullptr;
-+	const auto backgroundEmojiData = (Ui::BackgroundEmojiData*)nullptr;
- 	const auto backgroundEmojiCache = !backgroundEmojiData
- 		? nullptr
- 		: useColorCollectible
--- 
-2.52.0
 
 
 From 3f947e044ca4481920b1ff1b733b4023e07e81d9 Mon Sep 17 00:00:00 2001
@@ -732,4 +497,3 @@ index 47318a7bb4..0a3ae5c226 100644
  void Widget::setupSwipeBack() {
 -- 
 2.52.0
-
