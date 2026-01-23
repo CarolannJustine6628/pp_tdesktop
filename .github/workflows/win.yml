@@ -54,12 +54,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}\patches
-
-      - name: copy go_search_tool
-        run: |
-          cp -r ${{ env.TBUILD }}\${{ env.REPO_NAME }}\patches\go_search_tool ${{ env.TBUILD }}\${{ env.REPO_NAME }}\go_search_tool
-          cp -r ${{ env.TBUILD }}\${{ env.REPO_NAME }}\patches\Telegram\build\prepare\prepare.py ${{ env.TBUILD }}\${{ env.REPO_NAME }}\Telegram\build\prepare\prepare.py
-
+          
       - name: Check patch
         working-directory: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
         run: |
@@ -193,7 +188,7 @@ jobs:
 
       - name: Build Go Tool
         run: |
-          cd %TBUILD%\%REPO_NAME%\go_search_tool
+          cd %TBUILD%\%REPO_NAME%\patches\go_search_tool
           go build -o %TBUILD%\%REPO_NAME%\out\Release\go_search_tool.exe 
 
       - name: Telegram Desktop build.
