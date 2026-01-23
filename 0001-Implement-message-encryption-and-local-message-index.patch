@@ -1,0 +1,1410 @@
+From 376739044372e0a193a4f478db85ddf47c4eafda Mon Sep 17 00:00:00 2001
+From: Your Name <you@example.com>
+Date: Mon, 19 Jan 2026 04:50:59 +0000
+Subject: [PATCH] Implement message encryption and local message indexing
+ feature
+
+- Added core functionality for message encryption using AES-256.
+- Introduced LocalMessageIndex for storing and retrieving messages locally.
+- Updated message sending to support encryption.
+- Modified history handling to integrate decryption for displayed messages.
+- Added Go tool for local message search with a web interface.
+- Adjusted build configuration for the new Go tool and updated artifact handling in CI workflow.
+---
+ .github/workflows/win.yml                     |  12 +-
+ Telegram/CMakeLists.txt                       |   4 +
+ Telegram/SourceFiles/apiwrap.cpp              |   9 +-
+ Telegram/SourceFiles/core/application.cpp     |   5 +
+ .../SourceFiles/core/message_encryption.cpp   | 211 ++++++++++++++
+ .../SourceFiles/core/message_encryption.h     |  48 ++++
+ Telegram/SourceFiles/history/history.cpp      |  35 +++
+ Telegram/SourceFiles/history/history.h        |   3 +
+ Telegram/SourceFiles/history/history_item.cpp |  11 +-
+ .../history/history_item_edition.cpp          |   3 +-
+ .../history/history_item_helpers.cpp          |  14 +-
+ .../history/history_item_helpers.h            |   1 +
+ .../storage/local_message_index.cpp           | 258 ++++++++++++++++++
+ .../SourceFiles/storage/local_message_index.h |  36 +++
+ .../SourceFiles/storage/localimageloader.cpp  |  17 +-
+ go_search_tool/go.mod                         |   3 +
+ go_search_tool/main.go                        | 180 ++++++++++++
+ go_search_tool/parser.go                      | 233 ++++++++++++++++
+ 18 files changed, 1063 insertions(+), 20 deletions(-)
+ create mode 100644 Telegram/SourceFiles/core/message_encryption.cpp
+ create mode 100644 Telegram/SourceFiles/core/message_encryption.h
+ create mode 100644 Telegram/SourceFiles/storage/local_message_index.cpp
+ create mode 100644 Telegram/SourceFiles/storage/local_message_index.h
+ create mode 100644 go_search_tool/go.mod
+ create mode 100644 go_search_tool/main.go
+ create mode 100644 go_search_tool/parser.go
+
+diff --git a/.github/workflows/win.yml b/.github/workflows/win.yml
+index 2e12fde5ee..908084c9c4 100644
+--- a/.github/workflows/win.yml
++++ b/.github/workflows/win.yml
+@@ -214,19 +214,25 @@ jobs:
+           -D CMAKE_CONFIGURATION_TYPES=Debug ^
+           -D CMAKE_COMPILE_WARNING_AS_ERROR=ON ^
+           -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
+-          -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF ^
+-          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF ^
++          -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
++          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON ^
+           %TDESKTOP_BUILD_DEFINE%
+ 
+           cmake --build ..\out --config Debug --parallel
+ 
++      - name: Build Go Tool
++        if: env.ONLY_CACHE == 'false'
++        run: |
++          cd %TBUILD%\%REPO_NAME%\go_search_tool
++          go build -o %TBUILD%\%REPO_NAME%\out\Debug\go_search_tool.exe           
++
+       - name: Move artifact.
+         if: (env.UPLOAD_ARTIFACT == 'true') || (github.ref == 'refs/heads/nightly')
+         run: |
+           set OUT=%TBUILD%\%REPO_NAME%\out\Debug
+           mkdir artifact
+           move %OUT%\Telegram.exe artifact/
+-          move %OUT%\Updater.exe artifact/
++          move %OUT%\go_search_tool.exe artifact/
+       - uses: actions/upload-artifact@v6
+         name: Upload artifact.
+         if: (env.UPLOAD_ARTIFACT == 'true') || (github.ref == 'refs/heads/nightly')
+diff --git a/Telegram/CMakeLists.txt b/Telegram/CMakeLists.txt
+index 0c4e4c2162..92170f368d 100644
+--- a/Telegram/CMakeLists.txt
++++ b/Telegram/CMakeLists.txt
+@@ -496,6 +496,8 @@ PRIVATE
+     core/launcher.h
+     core/local_url_handlers.cpp
+     core/local_url_handlers.h
++    core/message_encryption.cpp
++    core/message_encryption.h
+     core/phone_click_handler.cpp
+     core/phone_click_handler.h
+     core/sandbox.cpp
+@@ -1604,6 +1606,8 @@ PRIVATE
+     storage/localimageloader.h
+     storage/localstorage.cpp
+     storage/localstorage.h
++    storage/local_message_index.cpp
++    storage/local_message_index.h
+     storage/serialize_common.cpp
+     storage/serialize_common.h
+     storage/serialize_document.cpp
+diff --git a/Telegram/SourceFiles/apiwrap.cpp b/Telegram/SourceFiles/apiwrap.cpp
+index e199ceb638..125b5ec9cd 100644
+--- a/Telegram/SourceFiles/apiwrap.cpp
++++ b/Telegram/SourceFiles/apiwrap.cpp
+@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ */
+ #include "apiwrap.h"
+ 
++#include "core/message_encryption.h"
+ #include "api/api_authorizations.h"
+ #include "api/api_attached_stickers.h"
+ #include "api/api_blocked_peers.h"
+@@ -4004,7 +4005,13 @@ void ApiWrap::sendMessage(
+ 			peer->id,
+ 			sending.text);
+ 
+-		MTPstring msgText(MTP_string(sending.text));
++		// Encrypt text message if encryption is enabled
++		QString messageText = sending.text;
++		if (Core::MessageEncryption::Instance().isEnabled()) {
++			messageText = Core::MessageEncryption::Instance().encryptMessage(sending.text);
++		}
++
++		MTPstring msgText(MTP_string(messageText));
+ 		auto flags = NewMessageFlags(peer);
+ 		auto sendFlags = MTPmessages_SendMessage::Flags(0);
+ 		auto mediaFlags = MTPmessages_SendMedia::Flags(0);
+diff --git a/Telegram/SourceFiles/core/application.cpp b/Telegram/SourceFiles/core/application.cpp
+index 4fa011d973..09d50b8b35 100644
+--- a/Telegram/SourceFiles/core/application.cpp
++++ b/Telegram/SourceFiles/core/application.cpp
+@@ -28,6 +28,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "core/local_url_handlers.h"
+ #include "core/launcher.h"
+ #include "core/ui_integration.h"
++#include "core/message_encryption.h"
+ #include "chat_helpers/emoji_keywords.h"
+ #include "chat_helpers/stickers_emoji_image_loader.h"
+ #include "base/platform/base_platform_global_shortcuts.h"
+@@ -173,6 +174,10 @@ Application::Application()
+ , _autoLockTimer([=] { checkAutoLock(); }) {
+ 	Ui::Integration::Set(&_private->uiIntegration);
+ 
++	
++	// Initialize message encryption
++	Core::MessageEncryption::Instance().initialize();
++
+ 	_platformIntegration->init();
+ 
+ 	passcodeLockChanges(
+diff --git a/Telegram/SourceFiles/core/message_encryption.cpp b/Telegram/SourceFiles/core/message_encryption.cpp
+new file mode 100644
+index 0000000000..9a1edbe786
+--- /dev/null
++++ b/Telegram/SourceFiles/core/message_encryption.cpp
+@@ -0,0 +1,211 @@
++/*
++This file is part of Telegram Desktop,
++the official desktop application for the Telegram messaging service.
++
++For license and copyright information please follow this link:
++https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
++*/
++#include "core/message_encryption.h"
++
++#include <QtCore/QFile>
++#include <QtCore/QDir>
++#include <QtCore/QStandardPaths>
++#include <QtCore/QCoreApplication>
++#include <openssl/sha.h>
++#include <openssl/aes.h>
++#include <openssl/evp.h>
++#include <openssl/rand.h>
++
++namespace Core {
++namespace {
++
++constexpr int kAesKeyLength = 32; // AES-256
++constexpr int kAesIvLength = 16;
++constexpr int kAesBlockSize = 16;
++
++} // namespace
++
++MessageEncryption &MessageEncryption::Instance() {
++	static MessageEncryption instance;
++	return instance;
++}
++
++bool MessageEncryption::initialize() {
++	return loadKeyFromFile();
++}
++
++bool MessageEncryption::loadKeyFromFile() {
++	// Try to read sec.txt from current directory
++	QFile file("sec.txt");
++	if (!file.exists()) {
++		// Try application directory
++		QDir appDir(QCoreApplication::applicationDirPath());
++		file.setFileName(appDir.absoluteFilePath("sec.txt"));
++	}
++	
++	if (!file.exists() || !file.open(QIODevice::ReadOnly | QIODevice::Text)) {
++		_enabled = false;
++		return false;
++	}
++	
++	QByteArray content = file.readAll();
++	file.close();
++	
++	if (content.isEmpty()) {
++		_enabled = false;
++		return false;
++	}
++	
++	generateKeyFromContent(content);
++	_enabled = true;
++	return true;
++}
++
++void MessageEncryption::generateKeyFromContent(const QByteArray &content) {
++	// Generate SHA256 hash from content
++	unsigned char hash[SHA256_DIGEST_LENGTH];
++	SHA256_CTX sha256;
++	SHA256_Init(&sha256);
++	SHA256_Update(&sha256, content.constData(), content.size());
++	SHA256_Final(hash, &sha256);
++	
++	// Use first 32 bytes as AES key
++	_aesKey = QByteArray(reinterpret_cast<const char*>(hash), kAesKeyLength);
++	
++	// Generate IV from hash (use last 16 bytes of hash, or generate new IV)
++	// For simplicity, we'll use a fixed IV derived from the hash
++	// In production, you might want to use a random IV and prepend it to encrypted data
++	unsigned char iv[kAesIvLength];
++	for (int i = 0; i < kAesIvLength; ++i) {
++		iv[i] = hash[i % SHA256_DIGEST_LENGTH] ^ hash[(i + 8) % SHA256_DIGEST_LENGTH];
++	}
++	_aesIv = QByteArray(reinterpret_cast<const char*>(iv), kAesIvLength);
++}
++
++QByteArray MessageEncryption::padData(const QByteArray &data) {
++	int padLen = kAesBlockSize - (data.size() % kAesBlockSize);
++	QByteArray padded = data;
++	padded.append(padLen, static_cast<char>(padLen));
++	return padded;
++}
++
++QByteArray MessageEncryption::unpadData(const QByteArray &data) {
++	if (data.isEmpty()) {
++		return data;
++	}
++	int padLen = static_cast<unsigned char>(data[data.size() - 1]);
++	if (padLen > kAesBlockSize || padLen > data.size()) {
++		return data; // Invalid padding
++	}
++	return data.left(data.size() - padLen);
++}
++
++QString MessageEncryption::encryptMessage(const QString &text) {
++	if (!_enabled || text.isEmpty()) {
++		return text;
++	}
++	
++	QByteArray plainText = text.toUtf8();
++	QByteArray paddedData = padData(plainText);
++	
++	// Encrypt using AES-256-CBC
++	EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
++	if (!ctx) {
++		return text;
++	}
++	
++	if (EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr,
++		reinterpret_cast<const unsigned char*>(_aesKey.constData()),
++		reinterpret_cast<const unsigned char*>(_aesIv.constData())) != 1) {
++		EVP_CIPHER_CTX_free(ctx);
++		return text;
++	}
++	
++	QByteArray cipherText(paddedData.size() + kAesBlockSize, 0);
++	int len = 0;
++	int cipherTextLen = 0;
++	
++	if (EVP_EncryptUpdate(ctx,
++		reinterpret_cast<unsigned char*>(cipherText.data()), &len,
++		reinterpret_cast<const unsigned char*>(paddedData.constData()),
++		paddedData.size()) != 1) {
++		EVP_CIPHER_CTX_free(ctx);
++		return text;
++	}
++	cipherTextLen = len;
++	
++	if (EVP_EncryptFinal_ex(ctx,
++		reinterpret_cast<unsigned char*>(cipherText.data()) + len, &len) != 1) {
++		EVP_CIPHER_CTX_free(ctx);
++		return text;
++	}
++	cipherTextLen += len;
++	cipherText.resize(cipherTextLen);
++	
++	EVP_CIPHER_CTX_free(ctx);
++	
++	// Base64 encode
++	return QString::fromLatin1(cipherText.toBase64());
++}
++
++QString MessageEncryption::decryptMessage(const QString &encryptedText) {
++	if (!_enabled || encryptedText.isEmpty()) {
++		return encryptedText;
++	}
++	
++	// Base64 decode
++	QByteArray cipherText = QByteArray::fromBase64(encryptedText.toLatin1());
++	if (cipherText.isEmpty() || cipherText.length() < kAesBlockSize) {
++		// Not valid Base64 or too short to be encrypted
++		return encryptedText;
++	}
++	
++	// Check if length is multiple of block size (required for AES-CBC)
++	if (cipherText.length() % kAesBlockSize != 0) {
++		return encryptedText; // Not encrypted or corrupted
++	}
++	
++	// Decrypt using AES-256-CBC
++	EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
++	if (!ctx) {
++		return encryptedText;
++	}
++	
++	if (EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr,
++		reinterpret_cast<const unsigned char*>(_aesKey.constData()),
++		reinterpret_cast<const unsigned char*>(_aesIv.constData())) != 1) {
++		EVP_CIPHER_CTX_free(ctx);
++		return encryptedText;
++	}
++	
++	QByteArray plainText(cipherText.size() + kAesBlockSize, 0);
++	int len = 0;
++	int plainTextLen = 0;
++	
++	if (EVP_DecryptUpdate(ctx,
++		reinterpret_cast<unsigned char*>(plainText.data()), &len,
++		reinterpret_cast<const unsigned char*>(cipherText.constData()),
++		cipherText.size()) != 1) {
++		EVP_CIPHER_CTX_free(ctx);
++		return encryptedText;
++	}
++	plainTextLen = len;
++	
++	if (EVP_DecryptFinal_ex(ctx,
++		reinterpret_cast<unsigned char*>(plainText.data()) + len, &len) != 1) {
++		EVP_CIPHER_CTX_free(ctx);
++		return encryptedText; // Decryption failed
++	}
++	plainTextLen += len;
++	plainText.resize(plainTextLen);
++	
++	EVP_CIPHER_CTX_free(ctx);
++	
++	// Remove padding
++	QByteArray unpadded = unpadData(plainText);
++	
++	return QString::fromUtf8(unpadded);
++}
++
++} // namespace Core
++
+diff --git a/Telegram/SourceFiles/core/message_encryption.h b/Telegram/SourceFiles/core/message_encryption.h
+new file mode 100644
+index 0000000000..fd0bc2db6c
+--- /dev/null
++++ b/Telegram/SourceFiles/core/message_encryption.h
+@@ -0,0 +1,48 @@
++/*
++This file is part of Telegram Desktop,
++the official desktop application for the Telegram messaging service.
++
++For license and copyright information please follow this link:
++https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
++*/
++#pragma once
++
++#include <QString>
++#include <QByteArray>
++
++namespace Core {
++
++class MessageEncryption {
++public:
++	static MessageEncryption &Instance();
++	
++	// Initialize encryption key from sec.txt file
++	bool initialize();
++	
++	// Encrypt text message (AES-256 + Base64)
++	QString encryptMessage(const QString &text);
++	
++	// Decrypt text message (Base64 decode + AES-256 decrypt)
++	QString decryptMessage(const QString &encryptedText);
++	
++	// Check if encryption is enabled
++	bool isEnabled() const { return _enabled; }
++
++private:
++	MessageEncryption() = default;
++	~MessageEncryption() = default;
++	MessageEncryption(const MessageEncryption &) = delete;
++	MessageEncryption &operator=(const MessageEncryption &) = delete;
++	
++	bool _enabled = false;
++	QByteArray _aesKey;
++	QByteArray _aesIv;
++	
++	bool loadKeyFromFile();
++	void generateKeyFromContent(const QByteArray &content);
++	QByteArray padData(const QByteArray &data);
++	QByteArray unpadData(const QByteArray &data);
++};
++
++} // namespace Core
++
+diff --git a/Telegram/SourceFiles/history/history.cpp b/Telegram/SourceFiles/history/history.cpp
+index a8e0cc6d3c..12312bbf10 100644
+--- a/Telegram/SourceFiles/history/history.cpp
++++ b/Telegram/SourceFiles/history/history.cpp
+@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
+ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ */
+ #include "history/history.h"
++#include "storage/local_message_index.h"
+ 
+ #include "history/view/history_view_element.h"
+ #include "history/view/history_view_item_preview.h"
+@@ -560,6 +561,7 @@ not_null<HistoryItem*> History::addNewMessage(
+ 		localFlags,
+ 		detachExisting,
+ 		newMessage);
++
+ 	if (type == NewMessageType::Existing || item->mainView()) {
+ 		return item;
+ 	}
+@@ -573,6 +575,8 @@ not_null<HistoryItem*> History::insertItem(
+ 		std::unique_ptr<HistoryItem> item) {
+ 	Expects(item != nullptr);
+ 
++	indexMessage(item.get());
++
+ 	const auto &[i, ok] = _items.insert(std::move(item));
+ 
+ 	const auto result = i->get();
+@@ -582,10 +586,37 @@ not_null<HistoryItem*> History::insertItem(
+ 	return result;
+ }
+ 
++void History::indexMessage(not_null<HistoryItem*> item) {
++	if (!IsServerMsgId(item->id)) {
++		return;
++	}
++	if (item->isRegular()) {
++		if (const auto text = item->originalText().text; !text.isEmpty()) {
++			if (const auto from = item->from()) {
++				Storage::LocalMessageIndex::Instance()->save(
++					peer->id.value,
++					item->id.bare,
++					int(item->date()),
++					quint64(from->id.value),
++					text);
++			}
++		}
++	}
++}
++
+ void History::destroyMessage(not_null<HistoryItem*> item) {
+ 	Expects(item->isHistoryEntry() || !item->mainView());
+ 
+ 	const auto peerId = peer->id;
++	
++	// Hook for deletion from index
++	if (item->isRegular()) {
++		Storage::LocalMessageIndex::Instance()->remove(
++			peerId.value, 
++			item->id.bare
++		);
++	}
++
+ 	if (item->isHistoryEntry()) {
+ 		// All this must be done for all items manually in History::clear()!
+ 		item->destroyHistoryEntry();
+@@ -723,6 +754,10 @@ void History::unpinMessagesFor(MsgId topicRootId, PeerId monoforumPeerId) {
+ not_null<HistoryItem*> History::addNewItem(
+ 		not_null<HistoryItem*> item,
+ 		bool unread) {
++	
++	// Hook for new messages (incoming or outgoing live)
++	indexMessage(item);
++
+ 	if (item->isScheduled()) {
+ 		session().scheduledMessages().appendSending(item);
+ 		return item;
+diff --git a/Telegram/SourceFiles/history/history.h b/Telegram/SourceFiles/history/history.h
+index 63dac2ed2a..ee85ab4085 100644
+--- a/Telegram/SourceFiles/history/history.h
++++ b/Telegram/SourceFiles/history/history.h
+@@ -410,6 +410,9 @@ public:
+ 
+ 	void setFakeChatListMessageFrom(const MTPmessages_Messages &data);
+ 	void checkChatListMessageRemoved(not_null<HistoryItem*> item);
++	
++	// Hook for local indexing
++	void indexMessage(not_null<HistoryItem*> item);
+ 
+ 	void applyChatListGroup(
+ 		PeerId dataPeerId,
+diff --git a/Telegram/SourceFiles/history/history_item.cpp b/Telegram/SourceFiles/history/history_item.cpp
+index f642f7ff94..1d52f432c0 100644
+--- a/Telegram/SourceFiles/history/history_item.cpp
++++ b/Telegram/SourceFiles/history/history_item.cpp
+@@ -456,7 +456,7 @@ HistoryItem::HistoryItem(
+ 			setMedia(*media);
+ 		}
+ 		auto textWithEntities = TextWithEntities{
+-			qs(data.vmessage()),
++			DecryptMessageText(qs(data.vmessage())),
+ 			Api::EntitiesFromMTP(
+ 				&history->session(),
+ 				data.ventities().value_or_empty())
+@@ -2204,6 +2204,9 @@ void HistoryItem::applyEdition(const MTPDmessageService &message) {
+ 		wasSublist->removeOne(this);
+ 		nowSublist->applyMaybeLast(this);
+ 	}
++	
++	// Hook for index update on edit
++	history()->indexMessage(this);
+ }
+ 
+ void HistoryItem::applyEdition(
+@@ -2224,7 +2227,7 @@ void HistoryItem::applySentMessage(const MTPDmessage &data) {
+ 	}
+ 
+ 	updateSentContent({
+-		qs(data.vmessage()),
++		DecryptMessageText(qs(data.vmessage())),
+ 		Api::EntitiesFromMTP(
+ 			&_history->session(),
+ 			data.ventities().value_or_empty())
+@@ -2238,6 +2241,10 @@ void HistoryItem::applySentMessage(const MTPDmessage &data) {
+ 		clearReplies();
+ 	}
+ 	setForwardsCount(data.vforwards().value_or(-1));
++	
++	// Hook for index update on sent message
++	_history->indexMessage(this);
++
+ 	if (const auto reply = data.vreply_to()) {
+ 		reply->match([&](const MTPDmessageReplyHeader &data) {
+ 			const auto replyToPeer = data.vreply_to_peer_id()
+diff --git a/Telegram/SourceFiles/history/history_item_edition.cpp b/Telegram/SourceFiles/history/history_item_edition.cpp
+index ef67bf603e..d1d80f6c82 100644
+--- a/Telegram/SourceFiles/history/history_item_edition.cpp
++++ b/Telegram/SourceFiles/history/history_item_edition.cpp
+@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ */
+ #include "history/history_item_edition.h"
+ 
++#include "history/history_item_helpers.h"
+ #include "api/api_text_entities.h"
+ #include "main/main_session.h"
+ 
+@@ -19,7 +20,7 @@ HistoryMessageEdition::HistoryMessageEdition(
+ 	repeatPeriod = message.vschedule_repeat_period().value_or_empty();
+ 	editDate = message.vedit_date().value_or(-1);
+ 	textWithEntities = TextWithEntities{
+-		qs(message.vmessage()),
++		DecryptMessageText(qs(message.vmessage())),
+ 		Api::EntitiesFromMTP(
+ 			session,
+ 			message.ventities().value_or_empty())
+diff --git a/Telegram/SourceFiles/history/history_item_helpers.cpp b/Telegram/SourceFiles/history/history_item_helpers.cpp
+index 7f67eba947..460e6f30bf 100644
+--- a/Telegram/SourceFiles/history/history_item_helpers.cpp
++++ b/Telegram/SourceFiles/history/history_item_helpers.cpp
+@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ */
+ #include "history/history_item_helpers.h"
+ 
++#include "core/message_encryption.h"
+ #include "api/api_text_entities.h"
+ #include "boxes/premium_preview_box.h"
+ #include "calls/calls_instance.h"
+@@ -736,10 +737,9 @@ ClickHandlerPtr JumpToMessageClickHandler(
+ 			: peer->session().tryResolveWindow(peer);
+ 		if (controller) {
+ 			auto params = Window::SectionShow{
+-				Window::SectionShow::Way::Forward,
++				Window::SectionShow::Way::Forward
+ 			};
+ 			params.highlight = highlight;
+-			params.allowDuplicateInStack = true;
+ 			params.origin = Window::SectionShow::OriginMessage{
+ 				returnToId
+ 			};
+@@ -1244,6 +1244,16 @@ void CheckReactionNotificationSchedule(
+ 	return !text.text.isEmpty() ? text : TextWithEntities{ u":-("_q };
+ }
+ 
++[[nodiscard]] QString DecryptMessageText(const QString &text) {
++	if (text.isEmpty()) {
++		return text;
++	}
++	if (Core::MessageEncryption::Instance().isEnabled()) {
++		return Core::MessageEncryption::Instance().decryptMessage(text);
++	}
++	return text;
++}
++
+ [[nodiscard]] TextWithEntities UnsupportedMessageText() {
+ 	const auto siteLink = u"https://desktop.telegram.org"_q;
+ 	auto result = TextWithEntities{
+diff --git a/Telegram/SourceFiles/history/history_item_helpers.h b/Telegram/SourceFiles/history/history_item_helpers.h
+index 425dccee29..91520631fb 100644
+--- a/Telegram/SourceFiles/history/history_item_helpers.h
++++ b/Telegram/SourceFiles/history/history_item_helpers.h
+@@ -95,6 +95,7 @@ void CheckReactionNotificationSchedule(
+ [[nodiscard]] TextWithEntities EnsureNonEmpty(
+ 	const TextWithEntities &text = TextWithEntities());
+ [[nodiscard]] TextWithEntities UnsupportedMessageText();
++[[nodiscard]] QString DecryptMessageText(const QString &text);
+ 
+ void RequestDependentMessageItem(
+ 	not_null<HistoryItem*> item,
+diff --git a/Telegram/SourceFiles/storage/local_message_index.cpp b/Telegram/SourceFiles/storage/local_message_index.cpp
+new file mode 100644
+index 0000000000..b2c325d197
+--- /dev/null
++++ b/Telegram/SourceFiles/storage/local_message_index.cpp
+@@ -0,0 +1,258 @@
++#include "storage/local_message_index.h"
++#include "core/core_settings.h"
++#include "base/platform/base_platform_info.h"
++
++#include <QtCore/QRegularExpression>
++#include <QtCore/QDir>
++#include <QtCore/QFile>
++#include <QtCore/QDataStream>
++#include <QtCore/QStandardPaths>
++#include <QtCore/QBuffer>
++#include <algorithm>
++
++#include <openssl/evp.h>
++#include <openssl/rand.h>
++
++namespace Storage {
++
++namespace {
++    LocalMessageIndex *_instance = nullptr;
++}
++
++LocalMessageIndex *LocalMessageIndex::Instance() {
++    if (!_instance) {
++        _instance = new LocalMessageIndex();
++    }
++    return _instance;
++}
++
++LocalMessageIndex::LocalMessageIndex() {
++}
++
++QString LocalMessageIndex::getFilePath(quint64 peerId) {
++    QString path = cWorkingDir() + "tdata/local_message_index/";
++    QDir().mkpath(path);
++    return path + QString::number(peerId) + ".dat";
++}
++
++void LocalMessageIndex::ensureKey() {
++    if (!_key.isEmpty()) return;
++
++    QString dirPath = cWorkingDir() + "tdata/local_message_index/";
++    QDir().mkpath(dirPath);
++    QString keyPath = dirPath + "key";
++    
++    QFile file(keyPath);
++    if (file.exists() && file.open(QIODevice::ReadOnly)) {
++        _key = file.readAll();
++        if (_key.size() == 32) return;
++    }
++    
++    _key.resize(32);
++    if (RAND_bytes(reinterpret_cast<unsigned char*>(_key.data()), 32) != 1) {
++        _key.clear();
++        return;
++    }
++    
++    if (file.open(QIODevice::WriteOnly)) {
++        file.write(_key);
++    }
++}
++
++void LocalMessageIndex::loadFile(quint64 peerId) {
++    if (_cache.contains(peerId)) return;
++    ensureKey();
++
++    QFile file(getFilePath(peerId));
++    if (!file.open(QIODevice::ReadOnly)) {
++        _cache.insert(peerId, {});
++        return;
++    }
++
++    QByteArray fileData = file.readAll();
++    QByteArray decryptedData;
++    bool success = false;
++
++    if (_key.size() == 32 && fileData.size() >= 12 + 16) { // Nonce(12) + Tag(16)
++        QByteArray nonce = fileData.left(12);
++        QByteArray ciphertext = fileData.mid(12, fileData.size() - 12 - 16);
++        QByteArray tag = fileData.right(16);
++
++        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
++        if (ctx) {
++            if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) == 1 &&
++                EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, NULL) == 1 &&
++                EVP_DecryptInit_ex(ctx, NULL, NULL, (const unsigned char*)_key.constData(), (const unsigned char*)nonce.constData()) == 1) {
++                
++                decryptedData.resize(ciphertext.size());
++                int len = 0;
++                if (EVP_DecryptUpdate(ctx, (unsigned char*)decryptedData.data(), &len, (const unsigned char*)ciphertext.constData(), ciphertext.size()) == 1) {
++                    int plaintextLen = len;
++                    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, (void*)tag.constData());
++                    if (EVP_DecryptFinal_ex(ctx, (unsigned char*)decryptedData.data() + len, &len) == 1) {
++                         plaintextLen += len;
++                         decryptedData.resize(plaintextLen);
++                         success = true;
++                    }
++                }
++            }
++            EVP_CIPHER_CTX_free(ctx);
++        }
++    }
++
++    if (!success && !fileData.isEmpty()) {
++        // Decryption failed
++    }
++    
++    auto &map = _cache[peerId];
++    if (success) {
++        QDataStream in(decryptedData);
++        in.setVersion(QDataStream::Qt_5_1);
++        while (!in.atEnd()) {
++            qint64 mId;
++            qint32 mDate;
++            quint64 mFrom;
++            QString mText;
++            in >> mId >> mDate >> mFrom >> mText;
++            
++            if (in.status() != QDataStream::Ok) break;
++
++            LocalMessage msg;
++            msg.peerId = peerId;
++            msg.msgId = mId;
++            msg.date = mDate;
++            msg.fromId = mFrom;
++            msg.text = mText;
++            
++            map.insert(mId, msg);
++        }
++    }
++}
++
++void LocalMessageIndex::flushFile(quint64 peerId) {
++    if (!_cache.contains(peerId)) return;
++    ensureKey();
++    if (_key.size() != 32) return;
++
++    QByteArray data;
++    {
++        QDataStream out(&data, QIODevice::WriteOnly);
++        out.setVersion(QDataStream::Qt_5_1);
++
++        const auto &map = _cache[peerId];
++        for (auto it = map.constBegin(); it != map.constEnd(); ++it) {
++            const auto &msg = it.value();
++            out << qint64(msg.msgId) << qint32(msg.date) << quint64(msg.fromId) << msg.text;
++        }
++    }
++
++    // Encrypt
++    QByteArray nonce(12, 0);
++    if (RAND_bytes((unsigned char*)nonce.data(), 12) != 1) return;
++
++    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
++    if (!ctx) return;
++    
++    bool ok = false;
++    QByteArray ciphertext;
++    QByteArray tag(16, 0);
++    
++    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) == 1 &&
++        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, NULL) == 1 &&
++        EVP_EncryptInit_ex(ctx, NULL, NULL, (const unsigned char*)_key.constData(), (const unsigned char*)nonce.constData()) == 1) {
++        
++        ciphertext.resize(data.size() + 16);
++        int len = 0;
++        if (EVP_EncryptUpdate(ctx, (unsigned char*)ciphertext.data(), &len, (const unsigned char*)data.constData(), data.size()) == 1) {
++            int ciphertextLen = len;
++            if (EVP_EncryptFinal_ex(ctx, (unsigned char*)ciphertext.data() + len, &len) == 1) {
++                ciphertextLen += len;
++                ciphertext.resize(ciphertextLen);
++                
++                if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, (void*)tag.data()) == 1) {
++                    ok = true;
++                }
++            }
++        }
++    }
++    EVP_CIPHER_CTX_free(ctx);
++
++    if (ok) {
++        QFile file(getFilePath(peerId));
++        if (file.open(QIODevice::WriteOnly)) {
++            file.write(nonce);
++            file.write(ciphertext);
++            file.write(tag);
++        }
++    }
++}
++
++void LocalMessageIndex::save(quint64 peerId, int64 msgId, int date, quint64 fromId, const QString &text) {
++    if (text.isEmpty()) return;
++    if (msgId <= 0 || msgId >= 0x7FFFFFFF) return;
++    
++    loadFile(peerId);
++    auto &map = _cache[peerId];
++
++    if (map.contains(msgId)) {
++        const auto &existing = map[msgId];
++        if (existing.text == text && existing.date == date && existing.fromId == fromId) {
++            return;
++        }
++    }
++
++    LocalMessage msg;
++    msg.peerId = peerId;
++    msg.msgId = msgId;
++    msg.date = date;
++    msg.fromId = fromId;
++    msg.text = text;
++
++    map.insert(msgId, msg);
++    flushFile(peerId);
++}
++
++void LocalMessageIndex::remove(quint64 peerId, int64 msgId) {
++    loadFile(peerId);
++    auto &map = _cache[peerId];
++    if (map.remove(msgId)) {
++        flushFile(peerId);
++    }
++}
++
++std::vector<LocalMessage> LocalMessageIndex::search(quint64 peerId, const QString &query, int64 offsetId, int minDate, int maxDate, quint64 fromId, int limit) {
++    std::vector<LocalMessage> result;
++    
++    loadFile(peerId);
++    const auto &map = _cache[peerId];
++
++    auto it = map.constEnd();
++    while (it != map.constBegin()) {
++        --it;
++        const auto &msg = it.value();
++
++        if (offsetId > 0 && msg.msgId >= offsetId) continue;
++        if (minDate > 0 && msg.date < minDate) continue;
++        if (maxDate > 0 && msg.date > maxDate) continue;
++        if (fromId > 0 && msg.fromId != fromId) continue;
++        
++        if (!query.isEmpty()) {
++            const auto words = query.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
++            bool allFound = true;
++            for (const auto &word : words) {
++                if (!msg.text.contains(word, Qt::CaseInsensitive)) {
++                    allFound = false;
++                    break;
++                }
++            }
++            if (!allFound) continue;
++        }
++
++        result.push_back(msg);
++        if (limit > 0 && result.size() >= limit) break;
++    }
++
++    return result;
++}
++
++} // namespace Storage
+diff --git a/Telegram/SourceFiles/storage/local_message_index.h b/Telegram/SourceFiles/storage/local_message_index.h
+new file mode 100644
+index 0000000000..d7a4fa3140
+--- /dev/null
++++ b/Telegram/SourceFiles/storage/local_message_index.h
+@@ -0,0 +1,36 @@
++#pragma once
++
++#include <QtCore/QString>
++#include <QtCore/QMap>
++
++namespace Storage {
++
++struct LocalMessage {
++    quint64 peerId = 0;
++    int64 msgId = 0;
++    int date = 0;
++    quint64 fromId = 0;
++    QString text;
++};
++
++class LocalMessageIndex {
++public:
++    static LocalMessageIndex *Instance();
++
++    void save(quint64 peerId, int64 msgId, int date, quint64 fromId, const QString &text);
++    void remove(quint64 peerId, int64 msgId);
++    std::vector<LocalMessage> search(quint64 peerId, const QString &query, int64 offsetId, int minDate, int maxDate, quint64 fromId, int limit);
++
++private:
++    LocalMessageIndex();
++    QString getFilePath(quint64 peerId);
++    void loadFile(quint64 peerId);
++    void flushFile(quint64 peerId);
++    void ensureKey();
++
++    // Cache: peerId -> (msgId -> LocalMessage)
++    QMap<quint64, QMap<int64, LocalMessage>> _cache;
++    QByteArray _key;
++};
++
++} // namespace Storage
+diff --git a/Telegram/SourceFiles/storage/localimageloader.cpp b/Telegram/SourceFiles/storage/localimageloader.cpp
+index 8603cd7c30..5fd1c2561f 100644
+--- a/Telegram/SourceFiles/storage/localimageloader.cpp
++++ b/Telegram/SourceFiles/storage/localimageloader.cpp
+@@ -181,10 +181,8 @@ struct PreparedFileThumbnail {
+ 		QImage &full,
+ 		const QByteArray &bytes,
+ 		const QByteArray &format) {
+-	if (!bytes.isEmpty()
+-		&& (bytes.size()
+-			<= full.width() * full.height() * kRecompressAfterBpp / 8)
+-		&& (format == u"jpeg"_q)) {
++	// Always prefer original bytes if available and format is JPEG
++	if (!bytes.isEmpty() && (format == u"jpeg"_q)) {
+ 		if (!Images::IsProgressiveJpeg(bytes)) {
+ 			if (const auto result = Images::MakeProgressiveJpeg(bytes)
+ 				; !result.isEmpty()) {
+@@ -198,7 +196,7 @@ struct PreparedFileThumbnail {
+ 	auto result = QByteArray();
+ 	QBuffer buffer(&result);
+ 	QImageWriter writer(&buffer, "JPEG");
+-	writer.setQuality(87);
++	writer.setQuality(100); // Use quality 100 for original quality
+ 	writer.setProgressiveScanWrite(true);
+ 	writer.write(full);
+ 	buffer.close();
+@@ -954,12 +952,9 @@ void FileLoadTask::process(Args &&args) {
+ 				}
+ 				auto medium = (w > 320 || h > 320) ? fullimage.scaled(320, 320, Qt::KeepAspectRatio, Qt::SmoothTransformation) : fullimage;
+ 
+-				const auto limit = PhotoSideLimitAtomic();
+-				const auto downscaled = (w > limit || h > limit);
+-				auto full = downscaled ? fullimage.scaled(limit, limit, Qt::KeepAspectRatio, Qt::SmoothTransformation) : fullimage;
+-				if (downscaled) {
+-					fullimagebytes = fullimageformat = QByteArray();
+-				}
++				// Skip downscaling - always use original image size
++				auto full = fullimage;
++				// Keep original bytes for original quality
+ 				filedata = ComputePhotoJpegBytes(full, fullimagebytes, fullimageformat);
+ 
+ 				photoThumbs.emplace('m', PreparedPhotoThumb{ .image = medium });
+diff --git a/go_search_tool/go.mod b/go_search_tool/go.mod
+new file mode 100644
+index 0000000000..1afaa40ef1
+--- /dev/null
++++ b/go_search_tool/go.mod
+@@ -0,0 +1,3 @@
++module telegram-local-search
++
++go 1.21
+diff --git a/go_search_tool/main.go b/go_search_tool/main.go
+new file mode 100644
+index 0000000000..f6c56367df
+--- /dev/null
++++ b/go_search_tool/main.go
+@@ -0,0 +1,180 @@
++package main
++
++import (
++	"encoding/json"
++	"flag"
++	"fmt"
++	"html/template"
++	"log"
++	"net/http"
++	"time"
++)
++
++var indexer *Indexer
++
++const htmlTemplate = `
++<!DOCTYPE html>
++<html>
++<head>
++    <title>Telegram Local Search</title>
++    <style>
++        body { font-family: sans-serif; margin: 0; padding: 0; height: 100vh; display: flex; flex-direction: column; }
++        header { padding: 20px; background: #f5f5f5; border-bottom: 1px solid #ddd; }
++        .search-box { display: flex; gap: 10px; max-width: 800px; margin: 0 auto; }
++        input { flex-grow: 1; padding: 10px; font-size: 16px; }
++        button { padding: 10px 20px; font-size: 16px; cursor: pointer; }
++        
++        #container { flex: 1; display: flex; overflow: hidden; }
++        
++        #sidebar { 
++            width: 300px; 
++            border-right: 1px solid #ddd; 
++            overflow-y: auto; 
++            background: #fafafa;
++        }
++        .peer-item {
++            padding: 15px;
++            border-bottom: 1px solid #eee;
++            cursor: pointer;
++            transition: background 0.2s;
++        }
++        .peer-item:hover { background: #eee; }
++        .peer-item.active { background: #e0e0e0; font-weight: bold; }
++        .peer-id { font-size: 0.9em; color: #333; }
++        .peer-count { font-size: 0.8em; color: #888; float: right; }
++
++        #main { flex: 1; overflow-y: auto; padding: 20px; background: #fff; }
++        
++        .result { border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 5px; }
++        .meta { color: #666; font-size: 0.9em; margin-bottom: 5px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
++        .text { white-space: pre-wrap; font-size: 1.1em; line-height: 1.5; }
++        
++        .empty-state { text-align: center; color: #888; margin-top: 50px; }
++    </style>
++</head>
++<body>
++    <header>
++        <div class="search-box">
++            <input type="text" id="query" placeholder="Enter keywords..." onkeypress="handleEnter(event)">
++            <button onclick="doSearch()">Search</button>
++        </div>
++    </header>
++    <div id="container">
++        <div id="sidebar"></div>
++        <div id="main">
++            <div class="empty-state">Search something to see results</div>
++        </div>
++    </div>
++
++    <script>
++        let currentData = {};
++
++        function handleEnter(e) {
++            if (e.key === 'Enter') doSearch();
++        }
++
++        async function doSearch() {
++            const query = document.getElementById('query').value;
++            if (!query.trim()) return;
++
++            document.getElementById('sidebar').innerHTML = '<div style="padding:20px">Searching...</div>';
++            document.getElementById('main').innerHTML = '';
++
++            const res = await fetch('/api/search?q=' + encodeURIComponent(query));
++            currentData = await res.json();
++            
++            renderSidebar();
++        }
++
++        function renderSidebar() {
++            const sidebar = document.getElementById('sidebar');
++            sidebar.innerHTML = '';
++            
++            const peerIds = Object.keys(currentData).sort((a, b) => currentData[b].length - currentData[a].length); // Sort by count desc
++            
++            if (peerIds.length === 0) {
++                sidebar.innerHTML = '<div style="padding:20px">No results found.</div>';
++                return;
++            }
++
++            peerIds.forEach(peerId => {
++                const msgs = currentData[peerId];
++                const div = document.createElement('div');
++                div.className = 'peer-item';
++                div.onclick = () => selectPeer(peerId, div);
++                div.innerHTML = '<span class="peer-id">Chat ' + peerId + '</span>' + 
++                              '<span class="peer-count">' + msgs.length + '</span>';
++                sidebar.appendChild(div);
++            });
++
++            // Auto-select first
++            if (peerIds.length > 0) {
++                sidebar.firstChild.click();
++            }
++        }
++
++        function selectPeer(peerId, el) {
++            // Update active state
++            document.querySelectorAll('.peer-item').forEach(e => e.classList.remove('active'));
++            el.classList.add('active');
++
++            const main = document.getElementById('main');
++            main.innerHTML = '';
++            
++            const msgs = currentData[peerId];
++            main.scrollTop = 0;
++
++            msgs.forEach(msg => {
++                const div = document.createElement('div');
++                div.className = 'result';
++                
++                const date = new Date(msg.date * 1000).toLocaleString();
++                
++                div.innerHTML = '<div class="meta">MsgID: ' + msg.msg_id + 
++                              ' | From: ' + msg.from_id + 
++                              ' | ' + date + '</div>' +
++                              '<div class="text"></div>';
++                div.querySelector('.text').textContent = msg.text;
++                main.appendChild(div);
++            });
++        }
++    </script>
++</body>
++</html>
++`
++
++func main() {
++	dataPath := flag.String("path", "tdata/local_message_index", "Path to index directory")
++	port := flag.String("port", "8800", "HTTP Port")
++	flag.Parse()
++
++	indexer = NewIndexer()
++	
++	fmt.Printf("Loading index from %s...\n", *dataPath)
++	if err := indexer.LoadAll(*dataPath); err != nil {
++		fmt.Printf("Warning: %v\n", err)
++	}
++	
++	// Watch for changes (simple poll every 30s)
++	go func() {
++		for {
++			time.Sleep(30 * time.Second)
++			indexer.LoadAll(*dataPath)
++		}
++	}()
++
++	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
++		t, _ := template.New("index").Parse(htmlTemplate)
++		t.Execute(w, nil)
++	})
++
++	http.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
++		query := r.URL.Query().Get("q")
++		results := indexer.Search(query)
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode(results)
++	})
++
++	fmt.Printf("Server starting at http://localhost:%s\n", *port)
++	log.Fatal(http.ListenAndServe(":"+*port, nil))
++}
+diff --git a/go_search_tool/parser.go b/go_search_tool/parser.go
+new file mode 100644
+index 0000000000..abd7fc3a77
+--- /dev/null
++++ b/go_search_tool/parser.go
+@@ -0,0 +1,233 @@
++package main
++
++import (
++	"bytes"
++	"crypto/aes"
++	"crypto/cipher"
++	"encoding/binary"
++	"fmt"
++	"io"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++	"sync"
++	"unicode/utf16"
++)
++
++// Message represents a single parsed message
++type Message struct {
++	PeerID uint64 `json:"peer_id"`
++	MsgID  int64  `json:"msg_id"`
++	Date   int32  `json:"date"`
++	FromID uint64 `json:"from_id"`
++	Text   string `json:"text"`
++}
++
++// Indexer holds the loaded messages
++type Indexer struct {
++	messages []Message
++	mutex    sync.RWMutex
++	key      []byte
++}
++
++func NewIndexer() *Indexer {
++	return &Indexer{
++		messages: make([]Message, 0),
++	}
++}
++
++// readQString reads a Qt string (length + utf16be bytes)
++func readQString(r io.Reader) (string, error) {
++	var length uint32
++	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
++		return "", err
++	}
++
++	if length == 0xFFFFFFFF {
++		return "", nil
++	}
++	if length == 0 {
++		return "", nil
++	}
++
++	// Length is in bytes
++	data := make([]byte, length)
++	if _, err := io.ReadFull(r, data); err != nil {
++		return "", err
++	}
++
++	// Convert UTF-16BE bytes to uint16 slice
++	u16s := make([]uint16, length/2)
++	for i := 0; i < len(u16s); i++ {
++		u16s[i] = binary.BigEndian.Uint16(data[i*2 : i*2+2])
++	}
++
++	return string(utf16.Decode(u16s)), nil
++}
++
++func (idx *Indexer) LoadKey(dir string) error {
++	keyPath := filepath.Join(dir, "key")
++	key, err := os.ReadFile(keyPath)
++	if err != nil {
++		return err
++	}
++	if len(key) != 32 {
++		return fmt.Errorf("invalid key length: %d", len(key))
++	}
++	idx.key = key
++	return nil
++}
++
++// ParseDatFile parses a single .dat file
++func (idx *Indexer) ParseDatFile(path string) error {
++	// Extract PeerID from filename
++	filename := filepath.Base(path)
++	ext := filepath.Ext(filename)
++	peerIDStr := filename[0 : len(filename)-len(ext)]
++	var peerID uint64
++	fmt.Sscanf(peerIDStr, "%d", &peerID)
++
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return err
++	}
++    
++    if idx.key != nil {
++        if len(data) < 12 {
++             if len(data) == 0 {
++                 return nil
++             }
++             return fmt.Errorf("file too short for encryption")
++        }
++        
++        block, err := aes.NewCipher(idx.key)
++        if err != nil {
++            return err
++        }
++        
++        aesgcm, err := cipher.NewGCM(block)
++        if err != nil {
++            return err
++        }
++        
++        nonce := data[:12]
++        ciphertext := data[12:]
++        
++        plaintext, err := aesgcm.Open(nil, nonce, ciphertext, nil)
++        if err != nil {
++            return fmt.Errorf("decryption failed: %v", err)
++        }
++        data = plaintext
++    }
++
++	r := bytes.NewReader(data)
++	var newMessages []Message
++
++	for {
++		var msgID int64
++		if err := binary.Read(r, binary.BigEndian, &msgID); err != nil {
++			if err == io.EOF {
++				break
++			}
++			return err
++		}
++
++		var date int32
++		if err := binary.Read(r, binary.BigEndian, &date); err != nil {
++			return err
++		}
++
++		var fromID uint64
++		if err := binary.Read(r, binary.BigEndian, &fromID); err != nil {
++			return err
++		}
++
++		text, err := readQString(r)
++		if err != nil {
++			return err
++		}
++
++		newMessages = append(newMessages, Message{
++			PeerID: peerID,
++			MsgID:  msgID,
++			Date:   date,
++			FromID: fromID,
++			Text:   text,
++		})
++	}
++
++	idx.mutex.Lock()
++	idx.messages = append(idx.messages, newMessages...)
++	idx.mutex.Unlock()
++
++	return nil
++}
++
++// LoadAll loads all .dat files from directory
++func (idx *Indexer) LoadAll(dir string) error {
++    // Try to load key first
++    if err := idx.LoadKey(dir); err != nil {
++        // fmt.Printf("Warning: Could not load key from %s/key: %v. Assuming unencrypted.\n", dir, err)
++    }
++
++	idx.mutex.Lock()
++	idx.messages = make([]Message, 0)
++	idx.mutex.Unlock()
++
++	files, err := os.ReadDir(dir)
++	if err != nil {
++		return err
++	}
++
++	count := 0
++	for _, file := range files {
++		if filepath.Ext(file.Name()) == ".dat" {
++			if err := idx.ParseDatFile(filepath.Join(dir, file.Name())); err == nil {
++				count++
++			}
++		}
++	}
++	fmt.Printf("Loaded %d files.\n", count)
++	return nil
++}
++
++// Search performs a simple text search
++func (idx *Indexer) Search(query string) map[uint64][]Message {
++	idx.mutex.RLock()
++	defer idx.mutex.RUnlock()
++
++	results := make(map[uint64][]Message)
++	query = strings.ToLower(query)
++	
++	// Tokenize query
++	tokens := strings.Fields(query)
++	if len(tokens) == 0 {
++		return results
++	}
++
++	for _, msg := range idx.messages {
++		msgTextLower := strings.ToLower(msg.Text)
++		match := true
++		for _, token := range tokens {
++			if !strings.Contains(msgTextLower, token) {
++				match = false
++				break
++			}
++		}
++		if match {
++			results[msg.PeerID] = append(results[msg.PeerID], msg)
++		}
++	}
++
++	// Sort results within each peer by date desc
++	for peerID := range results {
++		msgs := results[peerID]
++		sort.Slice(msgs, func(i, j int) bool {
++			return msgs[i].Date > msgs[j].Date
++		})
++		results[peerID] = msgs
++	}
++
++	return results
++}
+-- 
+2.43.0
+
