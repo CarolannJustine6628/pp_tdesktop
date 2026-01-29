@@ -1408,6 +1408,8 @@ index 0000000000..abd7fc3a77
 -- 
 2.43.0
 
+modify MaxMessageSize
+---
 diff --git a/Telegram/SourceFiles/config.h b/Telegram/SourceFiles/config.h
 index 5dc8b7ce76..a1b2c3d4e5 100644
 --- a/Telegram/SourceFiles/config.h
