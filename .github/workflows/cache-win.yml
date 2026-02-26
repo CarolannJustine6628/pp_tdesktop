@@ -1,4 +1,4 @@
-name: Windows_release.
+name: Windows_release_all_cache.
 
 on:
   workflow_dispatch:
