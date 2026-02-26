@@ -50,7 +50,7 @@ jobs:
           submodules: recursive
           repository: telegramdesktop/tdesktop
           path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
-          ref: ${{ github.ref }}
+          ref: ${{ github.ref_type == 'tag' && github.ref || 'dev' }}
 
       - name: Checkout patch
         uses: actions/checkout@v6
