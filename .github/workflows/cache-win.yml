@@ -57,17 +57,7 @@ jobs:
         with:
           path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}\patches
           
-      - name: Check patch
-        working-directory: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
-        run: |
-          git apply --check patches/0001-Implement-message-encryption-and-local-message-index.patch --exclude=go_search_tool/*
-          git apply --check patches/0002-remove-ads.patch
 
-      - name: Apply patch
-        working-directory: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
-        run: |
-          git apply patches/0001-Implement-message-encryption-and-local-message-index.patch --exclude=go_search_tool/*
-          git apply patches/0002-remove-ads.patch
 
       - name: First set up.
         shell: bash
